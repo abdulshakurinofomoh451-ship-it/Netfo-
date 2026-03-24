@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>OMNI-WORLD | Population Heatmap Twin</title>
+    <style>
+        :root { --neon: #00f2ff; --warn: #ff3c3c; --bg: #010409; }
+        body { margin: 0; background: var(--bg); overflow: hidden; font-family: 'Segoe UI', monospace; }
+        #canvas-container { position: absolute; width: 100%; height: 100%; cursor: grab; }
+
+        #hud {
+            position: absolute; top: 20px; left: 20px; width: 320px;
+            background: rgba(0, 10, 20, 0.95); border-left: 3px solid var(--neon);
+            padding: 25px; color: #fff; z-index: 100; backdrop-filter: blur(15px);
+        }
+        .label { font-size: 10px; color: var(--neon); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 12px; }
+        #pop-info { margin-top: 15px; padding: 12px; background: rgba(255, 60, 60, 0.1); border: 1px solid rgba(255, 60, 60, 0.3); border-radius: 4px; }
+        .density-val { font-size: 20px; font-weight: bold; color: var(--warn); }
+        .status-tag { font-size: 9px; margin-top: 10px; opacity: 0.6; color: var(--warn); }
+        input { width: 100%; background: #000; border: 1px solid #333; color: var(--neon); padding: 10px; margin-bottom: 10px; box-sizing: border-box; outline: none; }
+        input:focus { border-color: var(--neon); }
+        button { width: 100%; background: var(--neon); color: #000; border: none; padding: 12px; cursor: pointer; font-weight: bold; text-transform: uppercase; font-size: 11px; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <div class="label">Demographic Analysis</div>
+        <input type="text" id="query" placeholder="SEARCH SECTOR..." onkeypress="if(event.key==='Enter') searchLocation()">
+        <button onclick="searchLocation()">EXECUTE SCAN</button>
+
+        <div id="pop-info">
+            <div style="font-size: 9px; opacity: 0.8; margin-bottom: 5px;">POPULATION DENSITY SCAN</div>
+            <div class="density-val" id="pop-status">SCANNING...</div>
+            <div class="status-tag">HEATMAP_OVERLAY: ACTIVE</div>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.166.1/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.166.1/examples/jsm/",
+                "gsap": "https://cdn.skypack.dev/gsap"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import gsap from 'gsap';
+
+        let scene, camera, renderer, controls, earth, heatmap, clouds;
+        const sunPos = new THREE.Vector3(20, 10, 20);
+
+        init();
+
+        async function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(12, 6, 12);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            const loader = new THREE.TextureLoader();
+            const [day, night, cloudTex, stars] = await Promise.all([
+                loader.load('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg'),
+                loader.load('https://threejs.org/examples/textures/planets/earth_lights_2048.png'),
+                loader.load('https://threejs.org/examples/textures/planets/earth_clouds_2048.png'),
+                loader.load('https://threejs.org/examples/textures/planets/galaxy_starfield.png')
+            ]);
+
+            const earthMat = new THREE.ShaderMaterial({
+                uniforms: { sunDir: { value: sunPos.clone().normalize() }, tDay: { value: day }, tNight: { value: night } },
+                vertexShader: `varying vec2 vUv; varying vec3 vNormal; void main() { vUv = uv; vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+                fragmentShader: `varying vec2 vUv; varying vec3 vNormal; uniform vec3 sunDir; uniform sampler2D tDay; uniform sampler2D tNight; void main() { float i = dot(vNormal, normalize(sunDir)); gl_FragColor = vec4(mix(texture2D(tNight, vUv).rgb*2.0, texture2D(tDay, vUv).rgb, smoothstep(-0.2, 0.2, i)), 1.0); }`
+            });
+            earth = new THREE.Mesh(new THREE.SphereGeometry(5, 128, 128), earthMat);
+            scene.add(earth);
+
+            const heatMat = new THREE.MeshBasicMaterial({
+                map: night,
+                color: 0xff3c3c,
+                transparent: true,
+                opacity: 0.4,
+                blending: THREE.AdditiveBlending
+            });
+            heatmap = new THREE.Mesh(new THREE.SphereGeometry(5.02, 128, 128), heatMat);
+            scene.add(heatmap);
+
+            clouds = new THREE.Mesh(new THREE.SphereGeometry(5.15, 128, 128), new THREE.MeshLambertMaterial({ map: cloudTex, transparent: true, opacity: 0.25 }));
+            scene.add(clouds);
+
+            scene.add(new THREE.Mesh(new THREE.SphereGeometry(120, 64, 64), new THREE.MeshBasicMaterial({ map: stars, side: THREE.BackSide })));
+            scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            window.searchLocation = async () => {
+                const q = document.getElementById('query').value;
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`).then(r => r.json());
+
+                if(res[0]) {
+                    const { lat, lon } = res[0];
+                    const phi = (90 - lat) * (Math.PI / 180);
+                    const theta = (parseFloat(lon) + 180) * (Math.PI / 180);
+
+                    gsap.to(camera.position, {
+                        x: -(11 * Math.sin(phi) * Math.cos(theta)),
+                        y: (11 * Math.cos(phi)),
+                        z: (11 * Math.sin(phi) * Math.sin(theta)),
+                        duration: 2, ease: "power4.out"
+                    });
+
+                    document.getElementById('pop-status').innerText = "HIGH_DENSITY_FOUND";
+                    gsap.to(heatmap.material, { opacity: 0.8, duration: 0.5, yoyo: true, repeat: 1 });
+                }
+            };
+
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            earth.rotation.y += 0.0002;
+            heatmap.rotation.y += 0.0002;
+            clouds.rotation.y += 0.0004;
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
